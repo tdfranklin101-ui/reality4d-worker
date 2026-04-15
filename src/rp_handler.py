@@ -25,11 +25,34 @@ S3_PREFIX = os.environ.get("S3_PREFIX", "renders/")
 pipe = None
 
 
+def ensure_model_downloaded():
+    """Download LTX-Video model if not already present."""
+    marker = os.path.join(MODEL_DIR, "model_index.json")
+    if os.path.exists(marker):
+        print(f"[Worker] Model already present at {MODEL_DIR}")
+        return
+
+    print(f"[Worker] Model not found — downloading Lightricks/LTX-Video...")
+    dl_start = time.time()
+
+    from huggingface_hub import snapshot_download
+    snapshot_download(
+        "Lightricks/LTX-Video",
+        local_dir=MODEL_DIR,
+        ignore_patterns=["*.md", "*.txt", "LICENSE*"],
+    )
+
+    elapsed = time.time() - dl_start
+    print(f"[Worker] Model downloaded in {elapsed:.1f}s")
+
+
 def load_model():
     """Load LTX-Video pipeline once at worker startup."""
     global pipe
     if pipe is not None:
         return
+
+    ensure_model_downloaded()
 
     print(f"[Worker] Loading LTX-Video model from {MODEL_DIR}")
     start = time.time()
