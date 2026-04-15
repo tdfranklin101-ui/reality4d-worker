@@ -1,0 +1,32 @@
+{
+  "input": {
+    "prompt": "Photorealistic cinematic footage of a distinguished colonial gentleman delivering an impassioned speech at a wooden podium in a grand hall.",
+    "identity_blocks": [
+      {
+        "character_id": "benjamin_franklin",
+        "name": "Benjamin Franklin",
+        "identity": "Caucasian, fair ruddy skin, male, 70, receding gray hair thin on top with longer gray sides, round spectacles perched on nose, blue-gray eyes, 5 feet 10 inches, 220 lbs, portly statesman build, cream linen shirt with ruffled cravat",
+        "motion": "Standing at podium, gesturing emphatically with right hand raised, left hand gripping podium edge"
+      }
+    ],
+    "world_config": {},
+    "render_config": {
+      "duration_seconds": 5,
+      "resolution": "768x512",
+      "with_audio": false,
+      "fps": 24,
+      "composite_mode": "direct"
+    },
+    "scene_context": {
+      "scene_description": "Interior of Independence Hall, warm afternoon light streaming through tall windows, wooden furnishings, papers scattered on desks",
+      "mood": "dramatic, determined",
+      "dialogue_cue": "We must indeed all hang together, or most assuredly we shall all hang separately.",
+      "negative_prompt": "3D character render, cartoon, anime, CGI, plastic skin, doll-like, mannequin, video game",
+      "scene_heading": "INT. INDEPENDENCE HALL - DAY"
+    },
+    "project_id": "test-project-001",
+    "clip_id": "test-clip-001",
+    "content_mode": "live_action",
+    "production_type": "feature_90"
+  }
+}
