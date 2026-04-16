@@ -19,6 +19,6 @@ RUN mkdir -p /models/ltx-video
 
 COPY src/rp_handler.py /src/rp_handler.py
 
-RUN python3 -c "import torch; print('CUDA available:', torch.cuda.is_available()); import runpod; print('RunPod OK')"
+RUN python3 -c "import torch; print('torch version:', torch.__version__); import runpod; print('runpod OK'); import rembg; print('rembg OK')"
 
 CMD ["python3", "-u", "/src/rp_handler.py"]
