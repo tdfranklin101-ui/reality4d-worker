@@ -11,3 +11,5 @@ imageio[ffmpeg]
 huggingface_hub
 boto3
 requests
+rembg
+onnxruntime-gpu==1.18.0
