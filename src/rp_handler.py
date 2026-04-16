@@ -29,21 +29,42 @@ def ensure_model_downloaded():
     """Download LTX-Video model if not already present."""
     marker = os.path.join(MODEL_DIR, "model_index.json")
     if os.path.exists(marker):
-        print(f"[Worker] Model already present at {MODEL_DIR}")
+        existing_files = os.listdir(MODEL_DIR)
+        total_size = sum(
+            os.path.getsize(os.path.join(MODEL_DIR, f))
+            for f in existing_files
+            if os.path.isfile(os.path.join(MODEL_DIR, f))
+        )
+        print(f"[Worker] Model already present at {MODEL_DIR} ({len(existing_files)} files, {total_size / 1e9:.2f} GB)")
         return
 
-    print(f"[Worker] Model not found — downloading Lightricks/LTX-Video...")
+    print(f"[Worker] Model not found at {MODEL_DIR} — downloading Lightricks/LTX-Video from HuggingFace...")
+    print(f"[Worker] This is a ~13 GB download and may take 5-15 minutes on first cold start.")
     dl_start = time.time()
 
     from huggingface_hub import snapshot_download
-    snapshot_download(
-        "Lightricks/LTX-Video",
-        local_dir=MODEL_DIR,
-        ignore_patterns=["*.md", "*.txt", "LICENSE*"],
-    )
+
+    try:
+        snapshot_download(
+            "Lightricks/LTX-Video",
+            local_dir=MODEL_DIR,
+            ignore_patterns=["*.md", "*.txt", "LICENSE*", "*.png", "*.jpg"],
+        )
+    except Exception as e:
+        elapsed = time.time() - dl_start
+        partial_files = os.listdir(MODEL_DIR) if os.path.exists(MODEL_DIR) else []
+        print(f"[Worker] ERROR: Model download failed after {elapsed:.1f}s: {e}")
+        print(f"[Worker] Partial files in {MODEL_DIR}: {partial_files}")
+        raise
 
     elapsed = time.time() - dl_start
-    print(f"[Worker] Model downloaded in {elapsed:.1f}s")
+    dl_files = os.listdir(MODEL_DIR)
+    total_size = sum(
+        os.path.getsize(os.path.join(MODEL_DIR, f))
+        for f in dl_files
+        if os.path.isfile(os.path.join(MODEL_DIR, f))
+    )
+    print(f"[Worker] Model downloaded in {elapsed:.1f}s ({len(dl_files)} files, {total_size / 1e9:.2f} GB)")
 
 
 def load_model():
@@ -70,18 +91,30 @@ def load_model():
     print(f"[Worker] Model loaded in {elapsed:.1f}s")
 
 
-def build_prompt(inp):
+def build_prompt(inp, composite_mode="direct"):
     """
     Assemble a full cinematic prompt from structured input fields.
     Preserves every character identity detail, scene context, and style directive.
+
+    When composite_mode is 'depth_aware', renders a photorealistic character
+    performance against a simple neutral backdrop. AI background removal then
+    strips the background entirely, producing transparent frames. World Labs
+    3D environments fill in behind the character — no chroma key needed.
     """
     parts = []
+    is_character_pass = composite_mode in ("depth_aware", "green_screen")
+
+    if is_character_pass:
+        parts.append(
+            "Photorealistic cinematic footage of a real human actor performing "
+            "against a plain neutral backdrop. Soft even studio lighting on the "
+            "actor. Clean separation between the actor and the background."
+        )
 
     style_prefix = inp.get("scene_context", {}).get("style_prefix", "")
     if style_prefix:
         parts.append(style_prefix)
 
-    scene_desc = inp.get("scene_context", {}).get("scene_description", "")
     mood = inp.get("scene_context", {}).get("mood", "cinematic")
     scene_heading = inp.get("scene_context", {}).get("scene_heading", "")
 
@@ -101,9 +134,13 @@ def build_prompt(inp):
 
     base_prompt = inp.get("prompt", "")
     if base_prompt:
-        parts.append(base_prompt)
+        if is_character_pass:
+            parts.append(f"Action/performance: {base_prompt}")
+        else:
+            parts.append(base_prompt)
 
-    if scene_desc and scene_desc != base_prompt:
+    scene_desc = inp.get("scene_context", {}).get("scene_description", "")
+    if not is_character_pass and scene_desc and scene_desc != base_prompt:
         parts.append(scene_desc)
 
     dialogue_cue = inp.get("scene_context", {}).get("dialogue_cue", "")
@@ -121,7 +158,7 @@ def build_prompt(inp):
     return full_prompt
 
 
-def build_negative_prompt(inp):
+def build_negative_prompt(inp, composite_mode="direct"):
     """Build negative prompt from scene_context or use default."""
     custom = inp.get("scene_context", {}).get("negative_prompt", "")
     default = (
@@ -129,6 +166,11 @@ def build_negative_prompt(inp):
         "mannequin, video game, low quality, blurry, distorted, watermark, "
         "text overlay, gibberish glyphs, faux runes"
     )
+    is_character_pass = composite_mode in ("depth_aware", "green_screen")
+    if is_character_pass:
+        default += (
+            ", cluttered background, detailed environment, busy scenery"
+        )
     if custom:
         return f"{custom}, {default}"
     return default
@@ -176,9 +218,78 @@ def upload_to_s3(file_path, key):
     return url
 
 
-def export_video(frames, fps, clip_id):
-    """Export PIL frames to MP4 and return file path or URL."""
+rembg_session = None
+
+def remove_background_from_frames(frames):
+    """
+    Strip background from each frame using rembg AI matting.
+    Returns RGBA PIL Images with transparent background — no chroma key needed.
+    The AI model understands human boundaries including hair, translucent fabric,
+    and fine edges far better than any color-based keying.
+    """
+    global rembg_session
+    from rembg import remove, new_session
+    from PIL import Image
+    import numpy as np
+
+    if rembg_session is None:
+        print("[Worker] Loading rembg background removal model (u2net_human_seg)...")
+        rembg_session = new_session("u2net_human_seg")
+        print("[Worker] rembg model loaded")
+
+    transparent_frames = []
+    for i, frame in enumerate(frames):
+        if isinstance(frame, np.ndarray):
+            frame_img = Image.fromarray(frame)
+        else:
+            frame_img = frame
+
+        rgba = remove(frame_img, session=rembg_session, post_process_mask=True)
+        transparent_frames.append(rgba)
+
+        if i == 0 or (i + 1) % 24 == 0:
+            print(f"[Worker] Background removed: frame {i + 1}/{len(frames)}")
+
+    print(f"[Worker] Background removal complete: {len(transparent_frames)} transparent frames")
+    return transparent_frames
+
+
+def export_video(frames, fps, clip_id, is_character_pass=False):
+    """Export frames to video. Character passes export as WebM with alpha transparency.
+    Full scenes export as MP4."""
     import imageio
+    import numpy as np
+
+    if is_character_pass:
+        transparent_frames = remove_background_from_frames(frames)
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".webm", delete=False, dir="/tmp")
+        tmp_path = tmp.name
+        tmp.close()
+
+        rgba_arrays = []
+        for f in transparent_frames:
+            rgba_arrays.append(np.array(f.convert("RGBA")))
+
+        writer = imageio.get_writer(tmp_path, fps=fps, codec="libvpx-vp9",
+                                     output_params=["-pix_fmt", "yuva420p", "-auto-alt-ref", "0"])
+        for arr in rgba_arrays:
+            writer.append_data(arr)
+        writer.close()
+
+        file_size_mb = os.path.getsize(tmp_path) / (1024 * 1024)
+        print(f"[Worker] Exported transparent character video: {tmp_path} ({file_size_mb:.1f} MB)")
+
+        if UPLOAD_METHOD == "s3" and S3_BUCKET:
+            key = f"{clip_id}_{int(time.time())}_alpha.webm"
+            url = upload_to_s3(tmp_path, key)
+            os.unlink(tmp_path)
+            return {"video_url": url, "method": "s3", "format": "webm_alpha"}
+
+        with open(tmp_path, "rb") as f:
+            video_b64 = base64.b64encode(f.read()).decode("utf-8")
+        os.unlink(tmp_path)
+        return {"video_b64": video_b64, "method": "base64", "format": "webm_alpha"}
 
     tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False, dir="/tmp")
     tmp_path = tmp.name
@@ -190,12 +301,12 @@ def export_video(frames, fps, clip_id):
         key = f"{clip_id}_{int(time.time())}.mp4"
         url = upload_to_s3(tmp_path, key)
         os.unlink(tmp_path)
-        return {"video_url": url, "method": "s3"}
+        return {"video_url": url, "method": "s3", "format": "mp4"}
 
     with open(tmp_path, "rb") as f:
         video_b64 = base64.b64encode(f.read()).decode("utf-8")
     os.unlink(tmp_path)
-    return {"video_b64": video_b64, "method": "base64"}
+    return {"video_b64": video_b64, "method": "base64", "format": "mp4"}
 
 
 def handler(event):
@@ -224,9 +335,12 @@ def handler(event):
     width, height = parse_resolution(resolution)
     num_frames = duration_to_frames(duration_seconds, fps)
 
-    prompt = build_prompt(inp)
-    negative_prompt = build_negative_prompt(inp)
+    prompt = build_prompt(inp, composite_mode)
+    negative_prompt = build_negative_prompt(inp, composite_mode)
 
+    is_character_pass = composite_mode in ("depth_aware", "green_screen")
+    render_mode_label = "CHARACTER PASS (AI bg removal → transparent)" if is_character_pass else "FULL SCENE"
+    print(f"[Worker] Render mode: {render_mode_label}, composite_mode={composite_mode}")
     print(f"[Worker] Generating: {width}x{height}, {num_frames} frames ({duration_seconds}s @ {fps}fps)")
     print(f"[Worker] Prompt ({len(prompt)} chars): {prompt[:200]}...")
     print(f"[Worker] Negative: {negative_prompt[:100]}...")
@@ -277,7 +391,7 @@ def handler(event):
         }
 
     try:
-        result = export_video(frames, fps, clip_id)
+        result = export_video(frames, fps, clip_id, is_character_pass=is_character_pass)
     except Exception as e:
         return {
             "error": f"Video export failed: {str(e)}",
@@ -293,6 +407,8 @@ def handler(event):
         "video_b64": result.get("video_b64", ""),
         "duration_actual": round(duration_actual, 2),
         "composite_mode": composite_mode,
+        "video_format": result.get("format", "mp4"),
+        "has_alpha": is_character_pass,
         "clip_id": clip_id,
         "project_id": project_id,
         "generation_time_seconds": round(gen_time, 2),
@@ -308,6 +424,7 @@ def handler(event):
             "world_config_present": bool(inp.get("world_config", {}).get("world_id")),
             "branching_enabled": bool(inp.get("branching", {}).get("is_branch_point")),
             "upload_method": result.get("method", "unknown"),
+            "render_pass": "character_isolated" if is_character_pass else "full_scene",
         },
     }
 
@@ -316,3 +433,4 @@ def handler(event):
 
 
 runpod.serverless.start({"handler": handler})
+
