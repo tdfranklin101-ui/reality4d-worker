@@ -11,4 +11,4 @@ COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 RUN mkdir -p /models/ltx-video
 COPY src/src/rp_handler.py /src/rp_handler.py
-CMD ["python", "-u", "/src/rp_handler.py"]
+CMD ["python3", "-u", "/src/rp_handler.py"]
